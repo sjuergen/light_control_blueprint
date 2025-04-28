@@ -1,0 +1,354 @@
+blueprint:
+  name: Light Control (Advanced Motion & Brightness)
+  description: >
+    ## Light Control - Motion & Brightness Based
+
+    This blueprint controls lights based on motion detection, brightness levels, and night mode.
+    Features:
+    - Motion sensor based activation.
+    - Ambient brightness condition.
+    - Optional night mode with different brightness.
+    - Blocking entities for preventing auto on/off.
+    - Auto turn-off after no motion or timeout.
+    - Smooth user experience with smart defaults.
+
+  domain: automation
+  source_url: https://github.com/your-repo/light-control-blueprint
+  author: sjuergen
+
+input:
+  # Motion sensor to detect movement
+  motion_entity:
+    name: Motion Sensor
+    description: >
+      **Motion Sensor**
+      
+      The motion sensor that triggers the lights when detecting movement.
+    selector:
+      entity:
+        domain: binary_sensor
+        device_class: motion
+
+  # Brightness sensor to measure ambient light
+  brightness_entity:
+    name: Brightness Sensor
+    description: >
+      **Brightness Sensor**
+      
+      Sensor measuring ambient light level (lux).
+    selector:
+      entity:
+        domain: sensor
+        device_class: illuminance
+
+  # Threshold for brightness to allow light activation
+  max_brightness:
+    name: Maximum Ambient Brightness
+    description: >
+      **Maximum Brightness Threshold**
+      
+      If ambient brightness exceeds this value, lights won't turn on.
+    default: 0.2
+    selector:
+      number:
+        min: 0
+        max: 15
+        step: 0.2
+        unit_of_measurement: lx
+
+  # Duration to wait before turning off the lights
+  duration:
+    name: Auto-Off Delay
+    description: >
+      **Delay Before Lights Turn Off**
+      
+      Time in minutes to wait after no motion detected before turning off lights.
+    default: 5
+    selector:
+      number:
+        min: 0
+        max: 30
+        step: 0.5
+        unit_of_measurement: minutes
+
+  # Lights to be turned on when motion is detected
+  lights_to_turn_on:
+    name: Lights to Turn On
+    description: >
+      **Lights to Activate on Motion**
+      
+      Select the lights that should turn on upon motion detection.
+    selector:
+      entity:
+        domain: light
+        multiple: true
+
+  # Additional lights that should be turned off after timeout
+  additional_lights_to_turn_off:
+    name: Additional Lights to Turn Off
+    description: >
+      **Additional Lights to Turn Off on Timeout**
+      
+      Select extra lights that should also turn off after timeout.
+    default: []
+    selector:
+      entity:
+        domain: light
+        multiple: true
+
+  # Entities that block switching off if active
+  entities_blocking_switching_off:
+    name: Disable Auto Light-Off
+    description: >
+      **Entities Preventing Auto Turn-Off**
+      
+      If any selected entity is 'on', lights will not turn off.
+    default: false
+    selector:
+      entity:
+        filter:
+          domain:
+            - schedule
+            - binary_sensor
+            - input_boolean
+        multiple: true
+
+  # Entities that block switching on if active
+  entities_blocking_switching_on:
+    name: Disable Auto Light-On
+    description: >
+      **Entities Preventing Auto Turn-On**
+      
+      If any selected entity is 'on', lights will not turn on when motion is detected.
+    default: false
+    selector:
+      entity:
+        filter:
+          domain:
+            - schedule
+            - binary_sensor
+            - input_boolean
+        multiple: true
+
+  # Entity to indicate if Night Mode is active
+  night_mode_entity:
+    name: Night Mode Entity
+    description: >
+      **Night Mode Entity (Optional)**
+      
+      Entity that indicates Night Mode is active (should be 'on' to activate).
+    default: ""
+    selector:
+      entity:
+        filter:
+          domain:
+            - schedule
+            - input_boolean
+            - binary_sensor
+
+# Brightness for night mode
+  brightness_night:
+    name: Brightness for Night Mode
+    description: >
+      **Light Brightness at Night**
+      
+      Brightness percentage to use when Night Mode is active.
+    default: 20
+    selector:
+      number:
+        min: 0
+        max: 100
+        unit_of_measurement: "%"
+
+# Automation behavior settings
+mode: restart
+max_exceeded: silent
+
+trigger:
+  # Trigger when motion is detected
+  - platform: state
+    entity_id: !input motion_entity
+    from: "off"
+    to: "on"
+    id: motion_has_detected
+
+  # Trigger when no motion is detected for the specified duration
+  - platform: state
+    entity_id: !input motion_entity
+    from: "on"
+    to: "off"
+    id: no_motion_detected_for_duration
+    for:
+      minutes: !input duration
+
+  # Trigger when switch off blocker deactivates
+  - platform: state
+    entity_id: !input entities_blocking_switching_off
+    id: auto_switch_off_has_enabled
+    from: "on"
+    to: "off"
+
+  # Trigger when switch on blocker activates
+  - platform: state
+    entity_id: !input entities_blocking_switching_on
+    id: auto_switch_on_has_disabled
+    from: "off"
+    to: "on"
+
+  # Trigger if lights to turn on stay on for the specified duration
+  - platform: state
+    entity_id: !input lights_to_turn_on
+    id: light_is_on_for_duration
+    to: "on"
+    for:
+      minutes: !input duration
+
+  # Trigger if additional lights to turn off stay on for the specified duration
+  - platform: state
+    entity_id: !input additional_lights_to_turn_off
+    id: additional_light_is_on_for_duration
+    to: "on"
+    for:
+      minutes: !input duration
+
+action:
+  - variables:
+      night_mode_entity: !input night_mode_entity
+  - choose:
+      # Light on sequence based on motion and brightness
+      - alias: "Decision: Turn on the light if conditions are met"
+        conditions:
+          - condition: and
+            alias: "Condition: Motion detected and brightness low"
+            conditions:
+              - condition: state
+                entity_id: !input entities_blocking_switching_on
+                state: "off"
+              - condition: trigger
+                id: motion_has_detected
+              - condition: numeric_state
+                entity_id: !input brightness_entity
+                below: !input max_brightness
+        sequence:
+          - choose:
+              - conditions:
+                  - condition: template
+                    value_template: >
+                      {{ night_mode_entity != '' and states(night_mode_entity) == 'on' }}
+                sequence:
+                  - alias: "Action: Turn on selected lights at night with dimmed brightness"
+                    service: light.turn_on
+                    target:
+                      entity_id: !input lights_to_turn_on
+                    data:
+                      brightness_pct: !input brightness_night
+            default:
+              - alias: "Action: Turn on selected lights normally"
+                service: light.turn_on
+                target:
+                  entity_id: !input lights_to_turn_on
+                data:
+                  brightness_pct: 100
+
+      # Light off because manual switch off was allowed
+      - alias: "Decision: Switch Off because Manual auto switch off has enabled"
+        conditions:
+          - condition: trigger
+            id: auto_switch_off_has_enabled
+        sequence:
+          - alias: "Action: Turn off additional lights"
+            service: light.turn_off
+            target:
+              entity_id: !input additional_lights_to_turn_off
+
+          - alias: "Action: Turn off initially turned on lights"
+            service: light.turn_off
+            target:
+              entity_id: !input lights_to_turn_on
+      # Light off after no motion detected
+      - alias: "Decision: Switch off - No motion and allowed"
+        conditions:
+          - condition: and
+            alias: "Condition: No motion detected and switch off not blocked"
+            conditions:
+              - condition: trigger
+                id: no_motion_detected_for_duration
+              - condition: state
+                entity_id: !input entities_blocking_switching_off
+                state: "off"
+        sequence:
+          - alias: "Action: Turn off additional lights"
+            service: light.turn_off
+            target:
+              entity_id: !input additional_lights_to_turn_off
+
+          - alias: "Action: Turn off initially turned on lights"
+            service: light.turn_off
+            target:
+              entity_id: !input lights_to_turn_on
+      # Light off if light stays on too long without motion
+      - alias: "Decision: Switch off - Light on for duration and no motion"
+        conditions:
+          - condition: and
+            alias: "Condition: Light on for duration and no motion"
+            conditions:
+              - condition: trigger
+                id: light_is_on_for_duration
+              - condition: state
+                entity_id: !input motion_entity
+                state: "off"
+              - condition: state
+                entity_id: !input entities_blocking_switching_off
+                state: "off"
+        sequence:
+          - alias: "Action: Turn off additional lights"
+            service: light.turn_off
+            target:
+              entity_id: !input additional_lights_to_turn_off
+
+          - alias: "Action: Turn off initially turned on lights"
+            service: light.turn_off
+            target:
+              entity_id: !input lights_to_turn_on
+      # Light off if switch on blocker becomes active
+      - alias: "Decision: Switch off - Prohibit auto switch on enabled"
+        conditions:
+          - condition: trigger
+            id: auto_switch_on_has_disabled
+        sequence:
+          - alias: "Action: Turn off additional lights"
+            service: light.turn_off
+            target:
+              entity_id: !input additional_lights_to_turn_off
+
+          - alias: "Action: Turn off initially turned on lights"
+            service: light.turn_off
+            target:
+              entity_id: !input lights_to_turn_on
+      # Light off if light was manually turned on and no blocker
+      - alias: "Decision: Switch off - Light on for duration and no motion"
+        conditions:
+          - condition: and
+            alias: "Condition: Light has been on for a duration and no motion detected"
+            conditions:
+              - condition: or
+                conditions:
+                  - condition: trigger
+                    id: light_is_on_for_duration
+                  - condition: trigger
+                    id: additional_light_is_on_for_duration
+              - condition: state
+                entity_id: !input motion_entity
+                state: "off"
+              - condition: state
+                entity_id: !input entities_blocking_switching_off
+                state: "off"
+        sequence:
+          - alias: "Action: Turn off additional lights after timeout with no motion"
+            service: light.turn_off
+            target:
+              entity_id: !input additional_lights_to_turn_off
+          - alias: "Action: Turn off initially turned on lights after timeout with no motion"
+            service: light.turn_off
+            target:
+              entity_id: !input lights_to_turn_on
